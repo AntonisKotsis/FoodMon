@@ -6,6 +6,7 @@ import android.graphics.Matrix
 import android.util.Base64
 import androidx.exifinterface.media.ExifInterface
 import com.ak.foodmon.data.VisionModel
+import com.ak.foodmon.food.Product
 import com.anthropic.client.AnthropicClient
 import com.anthropic.client.okhttp.AnthropicOkHttpClient
 import com.anthropic.core.JsonValue
@@ -38,7 +39,7 @@ data class Analysis(val items: List<AnalyzedItem>, val notes: String)
 
 class AnalysisException(message: String) : Exception(message)
 
-/** Sends a meal photo to Claude and gets back per-item portion and nutrition estimates. */
+/** Sends meal photos to Claude for per-item portion and nutrition estimates, and reads nutrition labels. */
 class FoodAnalyzer {
     private var client: AnthropicClient? = null
     private var clientKey: String? = null
@@ -52,66 +53,102 @@ class FoodAnalyzer {
         return client!!
     }
 
-    suspend fun analyze(apiKey: String, model: VisionModel, jpeg: ByteArray, hint: String): Analysis =
-        withContext(Dispatchers.IO) {
-            if (apiKey.isBlank()) throw AnalysisException("Add your Anthropic API key in Settings first.")
-
-            val image = ImageBlockParam.builder()
-                .source(
-                    Base64ImageSource.builder()
-                        .data(Base64.encodeToString(jpeg, Base64.NO_WRAP))
-                        .mediaType(Base64ImageSource.MediaType.IMAGE_JPEG)
-                        .build()
-                )
-                .build()
-            val prompt = buildString {
-                append("Estimate the nutrition of the food in this photo.")
-                if (hint.isNotBlank()) append("\n\nNote from the person who ate it: ").append(hint.trim())
-            }
-
-            val params = MessageCreateParams.builder()
-                .model(model.id)
-                .maxTokens(16000L)
-                .system(SYSTEM_PROMPT)
-                .outputConfig(
-                    OutputConfig.builder()
-                        .effort(OutputConfig.Effort.MEDIUM)
-                        .format(JsonOutputFormat.builder().schema(RESPONSE_SCHEMA).build())
-                        .build()
-                )
-                .addUserMessageOfBlockParams(
-                    listOf(
-                        ContentBlockParam.ofImage(image),
-                        ContentBlockParam.ofText(TextBlockParam.builder().text(prompt).build()),
-                    )
-                )
-                .apply {
-                    // If a safety classifier wrongly declines a request, retry it on a fallback
-                    // model server-side instead of failing. Haiku has no server-side fallback.
-                    if (model != VisionModel.HAIKU) {
-                        putAdditionalHeader("anthropic-beta", "server-side-fallback-2026-07-01")
-                        putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
-                    }
-                }
-                .build()
-
-            val message = try {
-                clientFor(apiKey).messages().create(params)
-            } catch (e: UnauthorizedException) {
-                throw AnalysisException("The API key was rejected. Check it in Settings.")
-            } catch (e: AnthropicServiceException) {
-                throw AnalysisException("Claude API error (${e.statusCode()}): ${e.message}")
-            }
-
-            when (message.stopReason().orElse(null)) {
-                StopReason.REFUSAL -> throw AnalysisException("Claude declined to analyze this photo.")
-                StopReason.MAX_TOKENS -> throw AnalysisException("The response was cut off. Please try again.")
-                else -> Unit
-            }
-
-            val text = message.content().mapNotNull { it.text().orElse(null)?.text() }.joinToString("")
-            parse(text)
+    suspend fun analyze(apiKey: String, model: VisionModel, jpeg: ByteArray, hint: String): Analysis {
+        val prompt = buildString {
+            append("Estimate the nutrition of the food in this photo.")
+            if (hint.isNotBlank()) append("\n\nNote from the person who ate it: ").append(hint.trim())
         }
+        val text = request(apiKey, model, jpeg, SYSTEM_PROMPT, prompt, RESPONSE_SCHEMA, "Claude declined to analyze this photo.")
+        return parse(text)
+    }
+
+    /** Reads a nutrition facts label, for products that Open Food Facts doesn't know. */
+    suspend fun readLabel(apiKey: String, model: VisionModel, jpeg: ByteArray): Product {
+        val text = request(
+            apiKey, model, jpeg, LABEL_SYSTEM_PROMPT, "Read the nutrition label in this photo.", LABEL_SCHEMA,
+            "Claude declined to read this label.",
+        )
+        val o = try {
+            JSONObject(text)
+        } catch (e: Exception) {
+            throw AnalysisException("Couldn't read the response from Claude.")
+        }
+        if (!o.getBoolean("readable")) {
+            throw AnalysisException(o.optString("notes").ifBlank { "Couldn't read a nutrition label in this photo." })
+        }
+        return Product(
+            name = o.getString("name").trim(),
+            kcalPer100g = o.getDouble("kcal_per_100g"),
+            proteinPer100g = o.getDouble("protein_g_per_100g"),
+            carbsPer100g = o.getDouble("carbs_g_per_100g"),
+            fatPer100g = o.getDouble("fat_g_per_100g"),
+            servingGrams = o.getDouble("serving_grams").takeIf { it > 0 },
+        )
+    }
+
+    /** Sends one photo plus a prompt and returns Claude's JSON reply as text. */
+    private suspend fun request(
+        apiKey: String,
+        model: VisionModel,
+        jpeg: ByteArray,
+        system: String,
+        prompt: String,
+        schema: JsonOutputFormat.Schema,
+        refusalMessage: String,
+    ): String = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) throw AnalysisException("Add your Anthropic API key in Settings first.")
+
+        val image = ImageBlockParam.builder()
+            .source(
+                Base64ImageSource.builder()
+                    .data(Base64.encodeToString(jpeg, Base64.NO_WRAP))
+                    .mediaType(Base64ImageSource.MediaType.IMAGE_JPEG)
+                    .build()
+            )
+            .build()
+
+        val params = MessageCreateParams.builder()
+            .model(model.id)
+            .maxTokens(16000L)
+            .system(system)
+            .outputConfig(
+                OutputConfig.builder()
+                    .effort(OutputConfig.Effort.MEDIUM)
+                    .format(JsonOutputFormat.builder().schema(schema).build())
+                    .build()
+            )
+            .addUserMessageOfBlockParams(
+                listOf(
+                    ContentBlockParam.ofImage(image),
+                    ContentBlockParam.ofText(TextBlockParam.builder().text(prompt).build()),
+                )
+            )
+            .apply {
+                // If a safety classifier wrongly declines a request, retry it on a fallback
+                // model server-side instead of failing. Haiku has no server-side fallback.
+                if (model != VisionModel.HAIKU) {
+                    putAdditionalHeader("anthropic-beta", "server-side-fallback-2026-07-01")
+                    putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
+                }
+            }
+            .build()
+
+        val message = try {
+            clientFor(apiKey).messages().create(params)
+        } catch (e: UnauthorizedException) {
+            throw AnalysisException("The API key was rejected. Check it in Settings.")
+        } catch (e: AnthropicServiceException) {
+            throw AnalysisException("Claude API error (${e.statusCode()}): ${e.message}")
+        }
+
+        when (message.stopReason().orElse(null)) {
+            StopReason.REFUSAL -> throw AnalysisException(refusalMessage)
+            StopReason.MAX_TOKENS -> throw AnalysisException("The response was cut off. Please try again.")
+            else -> Unit
+        }
+
+        message.content().mapNotNull { it.text().orElse(null)?.text() }.joinToString("")
+    }
 
     private fun parse(text: String): Analysis {
         val root = try {
@@ -157,15 +194,35 @@ Name items in plain everyday terms ("grilled chicken breast", "white rice"). Whe
             "additionalProperties" to false,
         )
 
-        private val RESPONSE_SCHEMA: JsonOutputFormat.Schema = JsonOutputFormat.Schema.builder()
+        private fun schema(properties: Map<String, Any>): JsonOutputFormat.Schema = JsonOutputFormat.Schema.builder()
             .putAdditionalProperty("type", JsonValue.from("object"))
-            .putAdditionalProperty(
-                "properties",
-                JsonValue.from(obj("items" to obj("type" to "array", "items" to ITEM_SCHEMA), "notes" to obj("type" to "string"))),
-            )
-            .putAdditionalProperty("required", JsonValue.from(listOf("items", "notes")))
+            .putAdditionalProperty("properties", JsonValue.from(properties))
+            .putAdditionalProperty("required", JsonValue.from(properties.keys.toList()))
             .putAdditionalProperty("additionalProperties", JsonValue.from(false))
             .build()
+
+        private val RESPONSE_SCHEMA = schema(
+            obj("items" to obj("type" to "array", "items" to ITEM_SCHEMA), "notes" to obj("type" to "string")),
+        )
+
+        private const val LABEL_SYSTEM_PROMPT = """You read nutrition facts labels for a personal calorie-tracking app. The user photographs the label of a packaged food whose barcode wasn't found in a product database.
+
+Return energy in kcal and macronutrients per 100 g (per 100 ml for drinks). If the label only gives values per serving, convert them to per 100 g using the stated serving size. If only kJ is shown, divide by 4.184. Give the serving size in grams if the label states one, otherwise 0. For name, use the product name if it is visible in the photo, otherwise an empty string.
+
+If the photo doesn't show a readable nutrition label, set readable to false, use 0 for the numbers and say what went wrong in one short sentence in notes."""
+
+        private val LABEL_SCHEMA = schema(
+            obj(
+                "readable" to obj("type" to "boolean"),
+                "name" to obj("type" to "string"),
+                "kcal_per_100g" to obj("type" to "number"),
+                "protein_g_per_100g" to obj("type" to "number"),
+                "carbs_g_per_100g" to obj("type" to "number"),
+                "fat_g_per_100g" to obj("type" to "number"),
+                "serving_grams" to obj("type" to "number"),
+                "notes" to obj("type" to "string"),
+            ),
+        )
 
         /**
          * Decodes a photo, applies its EXIF rotation and downsizes it to at most 1568 px on the

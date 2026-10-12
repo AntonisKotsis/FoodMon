@@ -6,6 +6,7 @@ import androidx.glance.appwidget.updateAll
 import com.ak.foodmon.ai.FoodAnalyzer
 import com.ak.foodmon.data.AppDatabase
 import com.ak.foodmon.data.SettingsStore
+import com.ak.foodmon.food.ProductLookup
 import com.ak.foodmon.health.HealthConnectManager
 import com.ak.foodmon.ui.activeProfile
 import com.ak.foodmon.widget.FoodMonWidget
@@ -27,6 +28,7 @@ class AppContainer(context: Context) {
     val db = AppDatabase.create(context)
     val settings = SettingsStore(context)
     val analyzer = FoodAnalyzer()
+    val products = ProductLookup()
     val health = HealthConnectManager(context)
     val photoDir = File(context.filesDir, "photos").apply { mkdirs() }
     val cameraDir = File(context.cacheDir, "camera").apply { mkdirs() }

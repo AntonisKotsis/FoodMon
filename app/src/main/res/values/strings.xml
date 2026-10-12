@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">FoodMon</string>
+    <string name="widget_description">Calories left today, with quick buttons to log food and workouts</string>
+</resources>

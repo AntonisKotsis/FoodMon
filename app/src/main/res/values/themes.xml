@@ -1,0 +1,4 @@
+<resources>
+    <!-- Base application theme. The UI itself is themed in Compose (ui/theme/Theme.kt). -->
+    <style name="Theme.FoodMon" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

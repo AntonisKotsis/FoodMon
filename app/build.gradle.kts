@@ -63,9 +63,12 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.androidx.exifinterface)
     implementation(libs.androidx.glance.appwidget)
+    implementation(libs.play.services.code.scanner)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)
+    // Real org.json for JVM unit tests; android.jar only has stubs.
+    testImplementation(libs.org.json)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
 }

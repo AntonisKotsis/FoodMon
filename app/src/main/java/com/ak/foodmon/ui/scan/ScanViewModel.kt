@@ -13,6 +13,8 @@ import com.ak.foodmon.ai.AnalysisException
 import com.ak.foodmon.ai.AnalyzedItem
 import com.ak.foodmon.ai.FoodAnalyzer
 import com.ak.foodmon.data.FoodEntry
+import com.ak.foodmon.food.LookupException
+import com.ak.foodmon.food.Product
 import com.ak.foodmon.ui.activeProfile
 import com.ak.foodmon.ui.fmt
 import com.ak.foodmon.ui.toNumber
@@ -25,8 +27,19 @@ import java.time.LocalTime
 import java.util.UUID
 import kotlin.math.roundToInt
 
+/** Where an item came from. Re-analyzing the photo only replaces [PHOTO] items. */
+enum class ItemSource { PHOTO, PACKAGED, MANUAL }
+
 /** One editable line in the review list. Changing grams rescales calories and macros. */
-class ItemDraft(name: String, grams: Double, kcal: Double, protein: Double, carbs: Double, fat: Double) {
+class ItemDraft(
+    name: String,
+    grams: Double,
+    kcal: Double,
+    protein: Double,
+    carbs: Double,
+    fat: Double,
+    val source: ItemSource = ItemSource.MANUAL,
+) {
     var name by mutableStateOf(name)
     var gramsText by mutableStateOf(grams.roundToInt().toString())
         private set
@@ -56,7 +69,18 @@ class ItemDraft(name: String, grams: Double, kcal: Double, protein: Double, carb
     }
 
     companion object {
-        fun from(item: AnalyzedItem) = ItemDraft(item.name, item.grams, item.kcal, item.proteinG, item.carbsG, item.fatG)
+        fun from(item: AnalyzedItem) =
+            ItemDraft(item.name, item.grams, item.kcal, item.proteinG, item.carbsG, item.fatG, ItemSource.PHOTO)
+
+        /** Starts at one serving, or 100 g when the package doesn't say. */
+        fun from(product: Product): ItemDraft {
+            val grams = product.servingGrams ?: 100.0
+            val factor = grams / 100
+            return ItemDraft(
+                product.name, grams, product.kcalPer100g * factor, product.proteinPer100g * factor,
+                product.carbsPer100g * factor, product.fatPer100g * factor, ItemSource.PACKAGED,
+            )
+        }
     }
 }
 
@@ -64,6 +88,10 @@ sealed interface ScanStatus {
     data object Idle : ScanStatus
     data object Preparing : ScanStatus
     data object Analyzing : ScanStatus
+    data object LookingUp : ScanStatus
+    data object ReadingLabel : ScanStatus
+    /** Scanned product isn't in Open Food Facts; offer to photograph its nutrition label. */
+    data class NotFound(val barcode: String, val error: String? = null) : ScanStatus
     data class Error(val message: String) : ScanStatus
 }
 
@@ -101,7 +129,7 @@ class ScanViewModel(private val c: AppContainer, private val date: String) : Vie
             }
             photo?.delete()
             photo = prepared
-            items.clear()
+            items.removeAll { it.source == ItemSource.PHOTO }
             notes = ""
             status = ScanStatus.Idle
             analyze()
@@ -117,7 +145,7 @@ class ScanViewModel(private val c: AppContainer, private val date: String) : Vie
             try {
                 val bytes = withContext(Dispatchers.IO) { file.readBytes() }
                 val result = c.analyzer.analyze(c.settings.currentApiKey(), c.settings.currentModel(), bytes, hint)
-                items.clear()
+                items.removeAll { it.source == ItemSource.PHOTO }
                 items.addAll(result.items.map(ItemDraft::from))
                 notes = result.notes
                 status = ScanStatus.Idle
@@ -129,11 +157,57 @@ class ScanViewModel(private val c: AppContainer, private val date: String) : Vie
         }
     }
 
+    fun onBarcode(barcode: String) = viewModelScope.launch {
+        status = ScanStatus.LookingUp
+        status = try {
+            val product = c.products.lookup(barcode)
+            if (product == null) {
+                ScanStatus.NotFound(barcode)
+            } else {
+                items.add(ItemDraft.from(product))
+                ScanStatus.Idle
+            }
+        } catch (e: LookupException) {
+            ScanStatus.Error(e.message!!)
+        } catch (e: Exception) {
+            ScanStatus.Error("Product lookup failed: ${e.message ?: e.javaClass.simpleName}.")
+        }
+    }
+
+    fun onScanFailed(e: Exception) {
+        status = ScanStatus.Error("Barcode scanner unavailable: ${e.message ?: e.javaClass.simpleName}.")
+    }
+
+    /** The label photo was written to [captureFile]; it is only read, never kept as the meal photo. */
+    fun onLabelCaptured() {
+        val barcode = (status as? ScanStatus.NotFound)?.barcode ?: return
+        viewModelScope.launch {
+            status = ScanStatus.ReadingLabel
+            status = try {
+                val jpeg = withContext(Dispatchers.IO) { FoodAnalyzer.prepareJpeg(captureFile) }
+                val product = c.analyzer.readLabel(c.settings.currentApiKey(), c.settings.currentModel(), jpeg)
+                items.add(ItemDraft.from(product.copy(name = product.name.ifBlank { "Product $barcode" })))
+                ScanStatus.Idle
+            } catch (e: AnalysisException) {
+                ScanStatus.NotFound(barcode, e.message)
+            } catch (e: Exception) {
+                ScanStatus.NotFound(barcode, "Reading the label failed: ${e.message ?: e.javaClass.simpleName}.")
+            }
+        }
+    }
+
+    fun dismissNotFound() {
+        status = ScanStatus.Idle
+    }
+
     fun addManualItem() = items.add(ItemDraft("", 100.0, 0.0, 0.0, 0.0, 0.0))
 
     fun removeItem(item: ItemDraft) = items.remove(item)
 
-    val canSave get() = items.isNotEmpty() && items.all { it.name.isNotBlank() && it.grams > 0 } && status !is ScanStatus.Analyzing
+    /** A photo or network call is in flight; starting another would race over [status] and [items]. */
+    val busy get() = status in setOf(ScanStatus.Preparing, ScanStatus.Analyzing, ScanStatus.LookingUp, ScanStatus.ReadingLabel)
+
+    val canSave get() = items.isNotEmpty() && items.all { it.name.isNotBlank() && it.grams > 0 } && !busy
 
     fun save(onSaved: () -> Unit) = viewModelScope.launch {
         val profile = c.activeProfile().first() ?: return@launch
@@ -154,7 +228,7 @@ class ScanViewModel(private val c: AppContainer, private val date: String) : Vie
                     proteinG = it.protein,
                     carbsG = it.carbs,
                     fatG = it.fat,
-                    photoPath = savedPhoto?.path,
+                    photoPath = if (it.source == ItemSource.PACKAGED) null else savedPhoto?.path,
                 )
             }
         )

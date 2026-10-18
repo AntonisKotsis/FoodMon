@@ -14,7 +14,9 @@ anthropic = "2.71.0"
 coil = "3.6.3"
 exifinterface = "1.4.2"
 glance = "1.2.0"
+codeScanner = "16.1.0"
 junit = "4.13.2"
+orgJson = "20260814"
 junitVersion = "1.1.5"
 espressoCore = "3.5.1"
 
@@ -38,7 +40,9 @@ androidx-health-connect = { group = "androidx.health.connect", name = "connect-c
 anthropic-java = { group = "com.anthropic", name = "anthropic-java", version.ref = "anthropic" }
 androidx-exifinterface = { group = "androidx.exifinterface", name = "exifinterface", version.ref = "exifinterface" }
 androidx-glance-appwidget = { group = "androidx.glance", name = "glance-appwidget", version.ref = "glance" }
+play-services-code-scanner = { group = "com.google.android.gms", name = "play-services-code-scanner", version.ref = "codeScanner" }
 coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
+org-json = { group = "org.json", name = "json", version.ref = "orgJson" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }

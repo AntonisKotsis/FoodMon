@@ -1,6 +1,7 @@
 package com.ak.foodmon.ui.scan
 
 import android.net.Uri
+import androidx.activity.compose.ManagedActivityResultLauncher
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -44,6 +46,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -54,6 +57,9 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.ak.foodmon.data.VisionModel
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import com.ak.foodmon.ui.NumberField
 import com.ak.foodmon.ui.containerViewModel
 import com.ak.foodmon.ui.kcal
@@ -70,12 +76,29 @@ fun ScanScreen(date: String, onDone: () -> Unit) {
     val takePicture = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         if (ok) vm.onPhotoCaptured()
     }
+    val takeLabelPicture = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        if (ok) vm.onLabelCaptured()
+    }
     val pickPhoto = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri: Uri? ->
         if (uri != null) vm.onPhotoPicked(context, uri)
     }
-    fun launchCamera() {
+    fun capture(launcher: ManagedActivityResultLauncher<Uri, Boolean>) {
         vm.captureFile.delete()
-        takePicture.launch(FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", vm.captureFile))
+        launcher.launch(FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", vm.captureFile))
+    }
+    fun launchCamera() = capture(takePicture)
+
+    // Google's scanner UI handles the camera itself, so the app needs no camera permission.
+    val scanner = remember(context) {
+        val options = GmsBarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_EAN_13, Barcode.FORMAT_EAN_8, Barcode.FORMAT_UPC_A, Barcode.FORMAT_UPC_E)
+            .build()
+        GmsBarcodeScanning.getClient(context, options)
+    }
+    fun scanBarcode() {
+        scanner.startScan()
+            .addOnSuccessListener { barcode -> barcode.rawValue?.let(vm::onBarcode) }
+            .addOnFailureListener(vm::onScanFailed)
     }
 
     Scaffold(
@@ -101,7 +124,7 @@ fun ScanScreen(date: String, onDone: () -> Unit) {
         ) {
             PhotoBox(vm.photo, busy = vm.status == ScanStatus.Preparing, onCamera = ::launchCamera)
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = ::launchCamera) {
                     Icon(Icons.Default.CameraAlt, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
@@ -114,6 +137,11 @@ fun ScanScreen(date: String, onDone: () -> Unit) {
                     Spacer(Modifier.width(8.dp))
                     Text("Gallery")
                 }
+                OutlinedButton(onClick = ::scanBarcode, enabled = !vm.busy) {
+                    Icon(Icons.Default.QrCodeScanner, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Barcode")
+                }
             }
 
             OutlinedTextField(
@@ -124,7 +152,7 @@ fun ScanScreen(date: String, onDone: () -> Unit) {
             )
 
             if (vm.photo != null) {
-                Button(onClick = vm::analyze, enabled = vm.status !is ScanStatus.Analyzing, modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = vm::analyze, enabled = !vm.busy, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.AutoAwesome, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text(if (vm.items.isEmpty()) "Analyze with ${model.label}" else "Re-analyze with note")
@@ -132,11 +160,14 @@ fun ScanScreen(date: String, onDone: () -> Unit) {
             }
 
             when (val status = vm.status) {
-                ScanStatus.Analyzing -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(Modifier.size(24.dp))
-                    Spacer(Modifier.width(12.dp))
-                    Text("Estimating portions and calories…")
-                }
+                ScanStatus.Analyzing -> Progress("Estimating portions and calories…")
+                ScanStatus.LookingUp -> Progress("Looking up product…")
+                ScanStatus.ReadingLabel -> Progress("Reading the nutrition label…")
+                is ScanStatus.NotFound -> NotFoundCard(
+                    status,
+                    onPhotographLabel = { capture(takeLabelPicture) },
+                    onDismiss = vm::dismissNotFound,
+                )
                 is ScanStatus.Error -> Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
                     Text(status.message, Modifier.padding(12.dp), color = MaterialTheme.colorScheme.onErrorContainer)
                 }
@@ -173,6 +204,37 @@ fun ScanScreen(date: String, onDone: () -> Unit) {
                 Text("Add item manually")
             }
             Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun Progress(text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(Modifier.size(24.dp))
+        Spacer(Modifier.width(12.dp))
+        Text(text)
+    }
+}
+
+@Composable
+private fun NotFoundCard(status: ScanStatus.NotFound, onPhotographLabel: () -> Unit, onDismiss: () -> Unit) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Product ${status.barcode} isn't in Open Food Facts", style = MaterialTheme.typography.titleSmall)
+            Text(
+                status.error ?: "Take a photo of its nutrition label and Claude will read the values.",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (status.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onPhotographLabel) {
+                    Icon(Icons.Default.CameraAlt, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (status.error == null) "Photograph label" else "Retake label photo")
+                }
+                TextButton(onClick = onDismiss) { Text("Dismiss") }
+            }
         }
     }
 }

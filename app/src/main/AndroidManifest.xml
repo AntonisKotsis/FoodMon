@@ -24,6 +24,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.FoodMon">
 
+        <!-- Download the barcode scanner UI at install time instead of on first scan. -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="barcode_ui" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

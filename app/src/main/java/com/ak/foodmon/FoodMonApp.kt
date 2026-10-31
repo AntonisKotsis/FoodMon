@@ -8,6 +8,9 @@ import com.ak.foodmon.data.AppDatabase
 import com.ak.foodmon.data.SettingsStore
 import com.ak.foodmon.food.ProductLookup
 import com.ak.foodmon.health.HealthConnectManager
+import com.ak.foodmon.recipes.MealPlanRepository
+import com.ak.foodmon.recipes.QuotaGuard
+import com.ak.foodmon.recipes.SpoonacularClient
 import com.ak.foodmon.ui.activeProfile
 import com.ak.foodmon.widget.FoodMonWidget
 import kotlinx.coroutines.CoroutineScope
@@ -18,6 +21,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import java.io.File
@@ -30,6 +34,9 @@ class AppContainer(context: Context) {
     val analyzer = FoodAnalyzer()
     val products = ProductLookup()
     val health = HealthConnectManager(context)
+    val quotaGuard = QuotaGuard(load = { settings.spoonacularQuota.first() }, save = { settings.setSpoonacularQuota(it) })
+    val spoonacular = SpoonacularClient(quotaGuard) { settings.currentSpoonacularKey() }
+    val mealPlans = MealPlanRepository(db.planner(), spoonacular)
     val photoDir = File(context.filesDir, "photos").apply { mkdirs() }
     val cameraDir = File(context.cacheDir, "camera").apply { mkdirs() }
 }
@@ -44,6 +51,8 @@ class FoodMonApp : Application() {
         super.onCreate()
         container = AppContainer(this)
         keepWidgetInSync()
+        // Spoonacular data may only be kept for an hour.
+        appScope.launch { container.mealPlans.purgeExpiredCache() }
     }
 
     /** Redraw the home screen widget whenever today's numbers for the active profile change. */

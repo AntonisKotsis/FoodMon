@@ -43,6 +43,11 @@ android {
     }
 }
 
+ksp {
+    // Exported schemas let Room generate migrations between database versions.
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)

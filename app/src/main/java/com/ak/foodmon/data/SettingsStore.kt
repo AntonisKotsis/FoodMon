@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.map
 
 private val legacyApiKeyKey = stringPreferencesKey("anthropic_api_key")
 private val encryptedApiKeyKey = stringPreferencesKey("anthropic_api_key_enc")
+private val spoonacularKeyKey = stringPreferencesKey("spoonacular_api_key_enc")
+private val spoonacularQuotaKey = stringPreferencesKey("spoonacular_quota")
 
 /** Earlier versions stored the API key in plain text; encrypt it and drop the plain copy. */
 private object EncryptApiKeyMigration : DataMigration<Preferences> {
@@ -43,6 +45,9 @@ enum class VisionModel(val id: String, val label: String, val costHint: String) 
     }
 }
 
+/** Spoonacular points used on [date] (a UTC day, which is when their quota resets). */
+data class SpoonacularQuota(val date: String, val used: Double, val left: Double?)
+
 data class HealthCache(val profileId: Long, val date: String, val activeKcal: Double)
 
 class SettingsStore(private val context: Context) {
@@ -64,6 +69,29 @@ class SettingsStore(private val context: Context) {
     suspend fun setApiKey(key: String) = context.dataStore.edit {
         val trimmed = key.trim()
         if (trimmed.isEmpty()) it.remove(encryptedApiKeyKey) else it[encryptedApiKeyKey] = SecretCipher.encrypt(trimmed)
+    }
+
+    /** Decrypted Spoonacular key; empty if unset or no longer decryptable. */
+    val spoonacularKey: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[spoonacularKeyKey]?.let(SecretCipher::decrypt).orEmpty()
+    }
+
+    suspend fun setSpoonacularKey(key: String) = context.dataStore.edit {
+        val trimmed = key.trim()
+        if (trimmed.isEmpty()) it.remove(spoonacularKeyKey) else it[spoonacularKeyKey] = SecretCipher.encrypt(trimmed)
+    }
+
+    suspend fun currentSpoonacularKey(): String = spoonacularKey.first()
+
+    /** Stored as "yyyy-MM-dd|used|left", with left empty when unknown. */
+    val spoonacularQuota: Flow<SpoonacularQuota?> = context.dataStore.data.map { prefs ->
+        prefs[spoonacularQuotaKey]?.split('|')?.takeIf { it.size == 3 }?.let { (date, used, left) ->
+            SpoonacularQuota(date, used.toDoubleOrNull() ?: 0.0, left.toDoubleOrNull())
+        }
+    }
+
+    suspend fun setSpoonacularQuota(quota: SpoonacularQuota) = context.dataStore.edit {
+        it[spoonacularQuotaKey] = "${quota.date}|${quota.used}|${quota.left ?: ""}"
     }
 
     suspend fun setModel(model: VisionModel) = context.dataStore.edit { it[modelKey] = model.id }

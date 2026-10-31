@@ -38,8 +38,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ak.foodmon.data.VisionModel
 import com.ak.foodmon.domain.Calories
+import com.ak.foodmon.recipes.SpoonacularClient
+import com.ak.foodmon.recipes.oneDecimal
 import com.ak.foodmon.ui.appContainer
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -56,6 +59,13 @@ fun SettingsScreen(onEditProfile: (Long) -> Unit) {
         savedKey = c.settings.apiKey.first()
         apiKey = savedKey
     }
+    var spoonKey by remember { mutableStateOf("") }
+    var savedSpoonKey by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        savedSpoonKey = c.settings.spoonacularKey.first()
+        spoonKey = savedSpoonKey
+    }
+    val quota by remember { c.settings.spoonacularQuota.map { c.quotaGuard.today() } }.collectAsStateWithLifecycle(null)
 
     Scaffold(topBar = { TopAppBar(title = { Text("Settings") }) }) { padding ->
         Column(
@@ -82,52 +92,98 @@ fun SettingsScreen(onEditProfile: (Long) -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                OutlinedTextField(
+                KeyField(
                     value = apiKey,
+                    saved = savedKey,
+                    label = "Anthropic API key",
                     onValueChange = { apiKey = it },
-                    label = { Text("Anthropic API key") },
-                    singleLine = true,
-                    // Always masked, with no option to reveal it.
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        when {
-                            savedKey.isBlank() -> "No key saved"
-                            apiKey.trim() == savedKey -> "Key saved"
-                            else -> "Unsaved changes"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.weight(1f),
-                    )
-                    TextButton(enabled = apiKey.trim() != savedKey, onClick = {
+                    onSave = {
                         scope.launch {
                             c.settings.setApiKey(apiKey)
                             savedKey = apiKey.trim()
                         }
-                    }) { Text("Save key") }
-                }
+                    },
+                )
             }
 
-            Text("Model", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(start = 16.dp, top = 8.dp))
-            VisionModel.entries.forEach { m ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .selectable(selected = model == m, onClick = { scope.launch { c.settings.setModel(m) } })
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    RadioButton(selected = model == m, onClick = null)
-                    Column(Modifier.padding(start = 8.dp)) {
-                        Text(m.label)
-                        Text(m.costHint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+            ModelPicker(model, onSelect = { m -> scope.launch { c.settings.setModel(m) } })
+
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            SectionTitle("Meal planner (Spoonacular API)")
+            Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Recipes for the Planner tab come from Spoonacular. The free plan (50 points a day) " +
+                        "is enough. Get a key at spoonacular.com/food-api/console.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                KeyField(
+                    value = spoonKey,
+                    saved = savedSpoonKey,
+                    label = "Spoonacular API key",
+                    onValueChange = { spoonKey = it },
+                    onSave = {
+                        scope.launch {
+                            c.settings.setSpoonacularKey(spoonKey)
+                            savedSpoonKey = spoonKey.trim()
+                        }
+                    },
+                )
+                Text(
+                    "Points used today: ${(quota?.used ?: 0.0).oneDecimal()} / ${c.quotaGuard.dailyLimit.toInt()} " +
+                        "· resets at ${SpoonacularClient.localResetTime()}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModelPicker(model: VisionModel, onSelect: (VisionModel) -> Unit) {
+    Column {
+        Text("Model", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(start = 16.dp, top = 8.dp))
+        VisionModel.entries.forEach { m ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .selectable(selected = model == m, onClick = { onSelect(m) })
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = model == m, onClick = null)
+                Column(Modifier.padding(start = 8.dp)) {
+                    Text(m.label)
+                    Text(m.costHint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
+    }
+}
+
+/** An API key field that is always masked, with no option to reveal it. */
+@Composable
+private fun KeyField(value: String, saved: String, label: String, onValueChange: (String) -> Unit, onSave: () -> Unit) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            when {
+                saved.isBlank() -> "No key saved"
+                value.trim() == saved -> "Key saved"
+                else -> "Unsaved changes"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(enabled = value.trim() != saved, onClick = onSave) { Text("Save key") }
     }
 }
 

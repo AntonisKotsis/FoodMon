@@ -8,6 +8,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BarChart
+import androidx.compose.material.icons.filled.RestaurantMenu
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Today
 import androidx.compose.material3.Icon
@@ -31,6 +32,9 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.ak.foodmon.ui.exercise.AddExerciseScreen
 import com.ak.foodmon.ui.history.HistoryScreen
+import com.ak.foodmon.ui.planner.PlannerScreen
+import com.ak.foodmon.ui.planner.RecipeDetailScreen
+import com.ak.foodmon.ui.planner.ShoppingListScreen
 import com.ak.foodmon.ui.profile.EditProfileScreen
 import com.ak.foodmon.ui.scan.ScanScreen
 import com.ak.foodmon.ui.settings.SettingsScreen
@@ -70,6 +74,7 @@ private data class Tab(val route: String, val label: String, val icon: ImageVect
 private val tabs = listOf(
     Tab("today", "Today", Icons.Default.Today),
     Tab("history", "History", Icons.Default.BarChart),
+    Tab("planner", "Planner", Icons.Default.RestaurantMenu),
     Tab("settings", "Settings", Icons.Default.Settings),
 )
 
@@ -121,6 +126,25 @@ private fun FoodMonNavHost(pendingDestination: String?, onDestinationHandled: ()
                 )
             }
             composable("history") { HistoryScreen() }
+            composable("planner") {
+                PlannerScreen(
+                    onOpenRecipe = { id -> nav.navigate("recipe/$id") },
+                    onOpenShoppingList = { planId -> nav.navigate("shopping/$planId") },
+                    onOpenSettings = {
+                        nav.navigate("settings") {
+                            popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    },
+                )
+            }
+            composable("recipe/{id}", arguments = listOf(navArgument("id") { type = NavType.LongType })) { entry ->
+                RecipeDetailScreen(recipeId = entry.arguments?.getLong("id") ?: 0L, onBack = { nav.popBackStack() })
+            }
+            composable("shopping/{planId}", arguments = listOf(navArgument("planId") { type = NavType.LongType })) { entry ->
+                ShoppingListScreen(planId = entry.arguments?.getLong("planId") ?: 0L, onBack = { nav.popBackStack() })
+            }
             composable("settings") {
                 SettingsScreen(onEditProfile = { id -> nav.navigate("profile/$id") })
             }
